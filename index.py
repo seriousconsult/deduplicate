@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,8 +23,47 @@ from typing import IO, TypeVar
 SAMPLE_BYTES = 4096
 READ_BYTES = 1024 * 1024
 SORT_CHUNK = 8000
-PROGRESS_EVERY = 20000
 SKIP_DIRS = {".venv", ".git", "__pycache__"}
+
+
+class Progress:
+    """One-line status on stderr so long compares do not look hung."""
+
+    def __init__(self, label: str, total: int | None = None) -> None:
+        self.label = label
+        self.total = total
+        self.count = 0
+        self._last = 0.0
+        self._done = False
+        self._tty = sys.stderr.isatty()
+
+    def tick(self, n: int = 1) -> None:
+        self.count += n
+        now = time.monotonic()
+        interval = 0.25 if self._tty else 2.0
+        finished = self.total is not None and self.count >= self.total
+        if self.count != n and not finished and now - self._last < interval:
+            return
+        self._last = now
+        self._draw()
+
+    def _draw(self) -> None:
+        if self.total:
+            msg = f"{self.label} {self.count}/{self.total}"
+        else:
+            msg = f"{self.label} {self.count}"
+        if self._tty:
+            print(f"\r{msg}   ", end="", file=sys.stderr, flush=True)
+        else:
+            print(msg, file=sys.stderr, flush=True)
+
+    def done(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._draw()
+        if self._tty:
+            print(file=sys.stderr, flush=True)
 
 T = TypeVar("T")
 KeyFn = Callable[[T], object]
@@ -124,11 +164,19 @@ def external_sort(src: Path, dest: Path, key: KeyFn[Record], tmpdir: Path) -> No
         run_paths.append(run_path)
         chunk.clear()
 
+    progress: Progress | None = None
+    total = count_records(src)
+    if total >= 500:
+        progress = Progress("Sorting", total)
     for rec in iter_records(src):
         chunk.append(rec)
+        if progress:
+            progress.tick()
         if len(chunk) >= SORT_CHUNK:
             flush()
     flush()
+    if progress:
+        progress.done()
 
     if not run_paths:
         dest.write_text("", encoding="utf-8")
@@ -219,6 +267,7 @@ def scan_folder(
     count = 0
     errors = 0
     dest.parent.mkdir(parents=True, exist_ok=True)
+    progress = Progress("Scanning")
     with dest.open("w", encoding="utf-8") as fp:
         for entry in walk_files(root, skip_paths, extensions):
             try:
@@ -237,8 +286,8 @@ def scan_folder(
                 ),
             )
             count += 1
-            if count % PROGRESS_EVERY == 0:
-                print(f"Scanned {count} files...", file=sys.stderr)
+            progress.tick()
+    progress.done()
     return count, errors
 
 
@@ -281,8 +330,10 @@ def map_records(
     src: Path,
     dest: Path,
     mapper: Callable[[Record], Record | None],
+    label: str | None = None,
 ) -> int:
     count = 0
+    progress = Progress(label, count_records(src)) if label else None
     with dest.open("w", encoding="utf-8") as fp:
         for rec in iter_records(src):
             mapped = mapper(rec)
@@ -290,6 +341,10 @@ def map_records(
                 continue
             write_record(fp, mapped)
             count += 1
+            if progress:
+                progress.tick()
+    if progress:
+        progress.done()
     return count
 
 
@@ -320,6 +375,7 @@ def iter_colliding_keys(
     key: KeyFn[Record],
     tmpdir: Path,
     prefix: str,
+    label: str | None = None,
 ) -> Iterator[tuple[object, Path, int]]:
     """Yield on-disk groups for keys that appear more than once in a sorted file.
 
@@ -347,7 +403,14 @@ def iter_colliding_keys(
         count = 0
         return result
 
+    progress: Progress | None = None
+    if label:
+        total = count_records(src)
+        if total >= 500:
+            progress = Progress(label, total)
     for rec in iter_records(src):
+        if progress:
+            progress.tick()
         rec_key = key(rec)
         if first is None:
             first = rec
@@ -372,6 +435,8 @@ def iter_colliding_keys(
     closed = flush()
     if closed is not None:
         yield closed
+    if progress:
+        progress.done()
 
 
 def confirm_pair_file(path: Path) -> Path | None:
@@ -397,7 +462,7 @@ def groups_from_hashes(src: Path, tmpdir: Path) -> Iterator[Path]:
             return None
         return rec
 
-    if map_records(src, hashed, add_digest) < 2:
+    if map_records(src, hashed, add_digest, label="Hashing") < 2:
         hashed.unlink(missing_ok=True)
         return
 
@@ -439,7 +504,7 @@ def confirm_unique_file(src: Path, size: int, tmpdir: Path) -> Iterator[Path]:
             return None
         return rec
 
-    if map_records(src, sampled, add_sample) < 2:
+    if map_records(src, sampled, add_sample, label="Sampling") < 2:
         sampled.unlink(missing_ok=True)
         return
 
@@ -466,7 +531,7 @@ def confirm_unique_file(src: Path, size: int, tmpdir: Path) -> Iterator[Path]:
 
 def find_duplicate_files(sorted_by_size: Path, tmpdir: Path) -> Iterator[Path]:
     for size, group_path, count in iter_colliding_keys(
-        sorted_by_size, lambda rec: rec.size, tmpdir, "sizegrp_"
+        sorted_by_size, lambda rec: rec.size, tmpdir, "sizegrp_", label="Comparing"
     ):
         try:
             if count < 2:

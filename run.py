@@ -235,6 +235,12 @@ def confirm_trash(choice: str, folder: Path, side: SideList) -> bool:
 def trash_listed(list_path: Path) -> tuple[int, int]:
     ok = 0
     failed = 0
+    total = 0
+    with list_path.open("r", encoding="utf-8") as fp:
+        for line in fp:
+            if line.strip():
+                total += 1
+    progress = indexer.Progress("Moving to trash", total) if total else None
     with list_path.open("r", encoding="utf-8") as fp:
         for line in fp:
             if not line.strip():
@@ -246,6 +252,10 @@ def trash_listed(list_path: Path) -> tuple[int, int]:
             except OSError as exc:
                 print(f"Failed {path}: {exc}", file=sys.stderr)
                 failed += 1
+            if progress:
+                progress.tick()
+    if progress:
+        progress.done()
     return ok, failed
 
 
