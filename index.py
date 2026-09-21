@@ -233,28 +233,22 @@ def walk_files(
     skip_paths: set[str],
     extensions: frozenset[str] | None = None,
 ) -> Iterator[os.DirEntry[str]]:
-    stack = [str(root)]
-    while stack:
-        current = stack.pop()
-        try:
-            listing = os.scandir(current)
-        except OSError:
-            continue
-        with listing:
-            for entry in listing:
-                try:
-                    path = entry.path
-                    if path in skip_paths:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if entry.name in SKIP_DIRS:
-                            continue
-                        stack.append(path)
-                    elif entry.is_file(follow_symlinks=False):
-                        if matches_extension(entry.name, extensions):
-                            yield entry
-                except OSError:
+    """Yield files in root only. Nested folders are not entered."""
+    try:
+        listing = os.scandir(root)
+    except OSError:
+        return
+    with listing:
+        for entry in listing:
+            try:
+                if entry.path in skip_paths:
                     continue
+                if entry.is_file(follow_symlinks=False) and matches_extension(
+                    entry.name, extensions
+                ):
+                    yield entry
+            except OSError:
+                continue
 
 
 def scan_folder(

@@ -259,14 +259,128 @@ def trash_listed(list_path: Path) -> tuple[int, int]:
     return ok, failed
 
 
+def keep_record(recs: list[indexer.Record]) -> indexer.Record:
+    """Newest mtime wins; same mtime keeps the first name alphabetically."""
+    return min(recs, key=lambda rec: (-rec.mtime, rec.path))
+
+
+def show_same_folder_matches(
+    group_files,
+    tmpdir: Path,
+) -> tuple[int, SideList]:
+    extras = SideList(tmpdir / "extras.jsonl")
+    matches_path = tmpdir / "matches.jsonl"
+    matches = 0
+    match_bytes = 0
+    with extras.path.open("w", encoding="utf-8") as fe, matches_path.open(
+        "w", encoding="utf-8"
+    ) as fm:
+        for group_path in group_files:
+            recs = list(indexer.iter_records(group_path))
+            group_path.unlink(missing_ok=True)
+            if len(recs) < 2:
+                continue
+            matches += 1
+            size = recs[0].size
+            match_bytes += size
+            kept = keep_record(recs)
+            extras_recs = [rec for rec in recs if rec.path != kept.path]
+            extras_recs.sort(key=lambda rec: rec.path)
+            for rec in extras_recs:
+                _write_side(fe, rec, extras)
+            fm.write(
+                json.dumps(
+                    {
+                        "size": size,
+                        "keep": kept.path,
+                        "extras": [rec.path for rec in extras_recs],
+                    }
+                )
+            )
+            fm.write("\n")
+
+    print()
+    print(f"{matches} matches, {indexer.format_bytes(match_bytes)}")
+    print()
+    show_limit = PREVIEW_LIMIT if matches > FULL_LIST_MAX else matches
+    n = 0
+    with matches_path.open("r", encoding="utf-8") as fm:
+        for line in fm:
+            if not line.strip():
+                continue
+            n += 1
+            if n > show_limit:
+                break
+            item = json.loads(line)
+            print(f"{n}  {indexer.format_bytes(item['size'])}")
+            print(f"   keep   {item['keep']}")
+            for path in item["extras"]:
+                print(f"   extra  {path}")
+            print()
+    leftover = matches - show_limit
+    if leftover > 0:
+        print(f"... {leftover} more")
+        print()
+    return matches, extras
+
+
+def prompt_trash_extras(folder: Path, extras: SideList) -> str:
+    print(
+        f"Extras = {extras.count} files, {indexer.format_bytes(extras.nbytes)} under {folder}"
+    )
+    while True:
+        raw = input("Move extra copies to the trash? [T/K] ")
+        try:
+            return validate.parse_choice(raw, frozenset({"T", "K"}))
+        except validate.InputError as exc:
+            print(f"Rejected: {exc}")
+
+
+def compare_same_folder(folder: Path, extensions: frozenset[str] | None) -> int:
+    print(f"Indexing {folder}")
+    if extensions:
+        print(f"Types: {' '.join(sorted(extensions))}")
+
+    with tempfile.TemporaryDirectory(prefix="dedupe-same-") as raw_tmpdir:
+        tmpdir = Path(raw_tmpdir)
+        index_path = tmpdir / "files.jsonl"
+        scanned, errors = indexer.scan_folder(folder, index_path, set(), extensions)
+        print(f"{scanned} files")
+        if errors:
+            print(f"Skipped unreadable files: {errors}", file=sys.stderr)
+
+        sorted_path = tmpdir / "by_size.jsonl"
+        print("Comparing files in this folder...")
+        indexer.external_sort(
+            index_path, sorted_path, key=lambda rec: rec.size, tmpdir=tmpdir
+        )
+        group_files = indexer.find_duplicate_files(sorted_path, tmpdir)
+        matches, extras = show_same_folder_matches(group_files, tmpdir)
+        if matches == 0:
+            return 0
+
+        choice = prompt_trash_extras(folder, extras)
+        if choice == "K":
+            print("Kept all files.")
+            return 0
+        if not confirm_trash(choice, folder, extras):
+            print("Cancelled.")
+            return 0
+        ok, failed = trash_listed(extras.path)
+        print(f"Moved {ok} extra files to the trash.")
+        if failed:
+            print(f"Failed to move {failed} files.", file=sys.stderr)
+            return 1
+    return 0
+
+
 def compare_folders(
     folder_a: Path,
     folder_b: Path,
     extensions: frozenset[str] | None,
 ) -> int:
     if folder_a == folder_b:
-        print("Choose two different folders.", file=sys.stderr)
-        return 2
+        return compare_same_folder(folder_a, extensions)
 
     print(f"Indexing A: {folder_a}")
     print(f"Indexing B: {folder_b}")
