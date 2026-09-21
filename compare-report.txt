@@ -1,0 +1,4 @@
+# folder_a=/mnt/c/Users/serio/Pictures files=0
+# folder_b=/mnt/c/Users/serio/Downloads files=6
+# types=.jpg
+# matches=0 wasted=0

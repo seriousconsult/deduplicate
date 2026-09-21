@@ -147,7 +147,44 @@ def external_sort(src: Path, dest: Path, key: KeyFn[Record], tmpdir: Path) -> No
         path.unlink(missing_ok=True)
 
 
-def walk_files(root: Path, skip_paths: set[str]) -> Iterator[os.DirEntry[str]]:
+MAX_EXTENSION_LEN = 10
+
+
+class ExtensionError(ValueError):
+    """Invalid file-extension token."""
+
+
+def parse_extension(token: str) -> str:
+    """Return a normalized extension like '.mp4'. Raises ExtensionError if invalid."""
+    from validate import InputError, parse_single_extension
+
+    try:
+        return parse_single_extension(token)
+    except InputError as exc:
+        raise ExtensionError(str(exc)) from exc
+
+
+def normalize_extensions(raw: Iterable[str]) -> frozenset[str] | None:
+    """Turn 'mp4', '.webm', '*.mkv' into {'.mp4', '.webm', '.mkv'}. Empty means all."""
+    exts: set[str] = set()
+    for item in raw:
+        if not item.strip():
+            continue
+        exts.add(parse_extension(item))
+    return frozenset(exts) if exts else None
+
+
+def matches_extension(name: str, extensions: frozenset[str] | None) -> bool:
+    if not extensions:
+        return True
+    return Path(name).suffix.lower() in extensions
+
+
+def walk_files(
+    root: Path,
+    skip_paths: set[str],
+    extensions: frozenset[str] | None = None,
+) -> Iterator[os.DirEntry[str]]:
     stack = [str(root)]
     while stack:
         current = stack.pop()
@@ -166,18 +203,24 @@ def walk_files(root: Path, skip_paths: set[str]) -> Iterator[os.DirEntry[str]]:
                             continue
                         stack.append(path)
                     elif entry.is_file(follow_symlinks=False):
-                        yield entry
+                        if matches_extension(entry.name, extensions):
+                            yield entry
                 except OSError:
                     continue
 
 
-def scan_folder(root: Path, dest: Path, skip_paths: set[str]) -> tuple[int, int]:
+def scan_folder(
+    root: Path,
+    dest: Path,
+    skip_paths: set[str],
+    extensions: frozenset[str] | None = None,
+) -> tuple[int, int]:
     """Write one record per regular file. Returns (files, errors)."""
     count = 0
     errors = 0
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("w", encoding="utf-8") as fp:
-        for entry in walk_files(root, skip_paths):
+        for entry in walk_files(root, skip_paths, extensions):
             try:
                 stat = entry.stat(follow_symlinks=False)
             except OSError:
@@ -526,6 +569,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("duplicates.txt"),
         help="Where to write the duplicate report (default: ./duplicates.txt)",
     )
+    parser.add_argument(
+        "--ext",
+        action="append",
+        default=[],
+        metavar="EXT",
+        help="Only include this extension (repeatable). Example: --ext mp4 --ext webm",
+    )
     return parser.parse_args(argv)
 
 
@@ -539,9 +589,16 @@ def main(argv: list[str] | None = None) -> int:
     index_path = args.index.resolve()
     report_path = args.report.resolve()
     skip_paths = {str(index_path), str(report_path)}
+    try:
+        extensions = normalize_extensions(args.ext)
+    except ExtensionError as exc:
+        print(f"Invalid --ext: {exc}", file=sys.stderr)
+        return 2
 
     print(f"Scanning {folder}")
-    scanned, errors = scan_folder(folder, index_path, skip_paths)
+    if extensions:
+        print(f"Types: {' '.join(sorted(extensions))}")
+    scanned, errors = scan_folder(folder, index_path, skip_paths, extensions)
     print(f"Wrote file list ({scanned} files) to {index_path}")
     if errors:
         print(f"Skipped {errors} unreadable files", file=sys.stderr)
