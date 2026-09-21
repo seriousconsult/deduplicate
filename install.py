@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import platformutil
+
 ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 REQUIREMENTS = ROOT / "requirements.txt"
@@ -25,15 +27,20 @@ def _path_is_under(path: Path, parent: Path) -> bool:
 def running_in_project_venv() -> bool:
     if _path_is_under(Path(sys.executable), VENV):
         return True
-    return Path(sys.prefix).resolve() == VENV.resolve()
+    try:
+        return Path(sys.prefix).resolve() == VENV.resolve()
+    except OSError:
+        return False
 
 
 def base_python() -> str:
     base = Path(sys.base_prefix)
-    if sys.platform == "win32":
-        candidate = base / "python.exe"
-        if candidate.exists():
-            return str(candidate)
+    if platformutil.is_windows():
+        for name in ("python.exe", "python3.exe"):
+            candidate = base / name
+            if candidate.exists():
+                return str(candidate)
+        raise SystemExit(f"Could not find system Python under {base}")
     for name in ("python3", "python"):
         candidate = base / "bin" / name
         if candidate.exists():
@@ -68,29 +75,14 @@ def deactivate_and_reexec() -> None:
     py = base_python()
     env = env_without_venv()
     script = str(Path(__file__).resolve())
-    os.execve(py, [py, script, *sys.argv[1:]], env)
-
-
-def venv_python() -> Path:
-    if sys.platform == "win32":
-        return VENV / "Scripts" / "python.exe"
-    return VENV / "bin" / "python"
-
-
-def activate_script() -> Path:
-    if sys.platform == "win32":
-        return VENV / "Scripts" / "Activate.ps1"
-    return VENV / "bin" / "activate"
+    platformutil.exec_or_run([py, script, *sys.argv[1:]], env)
 
 
 def remove_venv() -> None:
     if not VENV.exists():
         return
     print(f"Deleting {VENV}", flush=True)
-    if sys.platform == "win32":
-        subprocess.check_call(["cmd", "/c", "rmdir", "/s", "/q", str(VENV)])
-        return
-    subprocess.check_call(["rm", "-rf", str(VENV)])
+    platformutil.remove_tree(VENV)
 
 
 def create_venv() -> None:
@@ -111,9 +103,12 @@ def requirement_lines() -> list[str]:
 
 
 def install_requirements() -> None:
-    py = venv_python()
+    py = platformutil.venv_python(ROOT)
     if not py.exists():
-        raise SystemExit(f"Expected interpreter not found: {py}")
+        raise SystemExit(
+            f"Expected interpreter not found: {py}\n"
+            "This .venv was probably created on another OS. Run install again here."
+        )
     packages = requirement_lines()
     if not packages:
         return
@@ -122,18 +117,26 @@ def install_requirements() -> None:
 
 def activate_venv() -> None:
     """Replace this process with an interactive shell that has .venv on PATH."""
-    activate = activate_script()
+    activate = platformutil.activate_script(ROOT)
     os.chdir(ROOT)
-    if sys.platform == "win32":
-        os.execvp(
-            "powershell",
+    if platformutil.is_windows():
+        powershell = platformutil.windows_powershell()
+        if not powershell:
+            raise SystemExit("PowerShell not found. Activate with .venv\\Scripts\\Activate.ps1")
+        root = str(ROOT).replace("'", "''")
+        act = str(activate).replace("'", "''")
+        platformutil.exec_or_run(
             [
-                "powershell",
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
                 "-NoExit",
                 "-Command",
-                f"Set-Location -LiteralPath '{ROOT}'; . '{activate}'; Write-Host '(.venv)'",
-            ],
+                f"Set-Location -LiteralPath '{root}'; . '{act}'; Write-Host '(.venv)'",
+            ]
         )
+        return
     rc = VENV / ".activate_rc"
     rc.write_text(
         "if [ -f \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi\n"
@@ -141,7 +144,7 @@ def activate_venv() -> None:
         "printf '(.venv)\\n'\n",
         encoding="utf-8",
     )
-    os.execvp("bash", ["bash", "--init-file", str(rc), "-i"])
+    platformutil.exec_or_run(["bash", "--init-file", str(rc), "-i"])
 
 
 def main() -> int:

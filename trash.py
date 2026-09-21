@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+
+import platformutil
 
 
 def wsl_to_windows_path(path: str) -> str | None:
@@ -63,8 +63,9 @@ def _trash_via_powershell(win_path: str) -> None:
         "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
         f"'{escaped}', 'OnlyErrorDialogs', 'SendToRecycleBin')"
     )
+    powershell = platformutil.windows_powershell() or "powershell.exe"
     subprocess.check_call(
-        ["powershell.exe", "-NoProfile", "-Command", script],
+        [powershell, "-NoProfile", "-Command", script],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -102,17 +103,18 @@ def send_to_trash(path: str) -> None:
     if not target.is_file():
         raise FileNotFoundError(path)
 
-    if sys.platform == "win32":
+    if platformutil.is_windows():
         _trash_windows(str(target.resolve()))
         return
 
-    win_path = wsl_to_windows_path(str(target.resolve()))
-    if win_path is not None:
-        try:
-            _trash_via_powershell(win_path)
-            return
-        except (OSError, subprocess.CalledProcessError):
-            pass
+    if platformutil.is_wsl():
+        win_path = wsl_to_windows_path(str(target.resolve()))
+        if win_path is not None and platformutil.windows_powershell():
+            try:
+                _trash_via_powershell(win_path)
+                return
+            except (OSError, subprocess.CalledProcessError):
+                pass
 
     if shutil.which("gio"):
         try:
