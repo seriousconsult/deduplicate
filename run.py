@@ -8,8 +8,10 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 import index as indexer
 import trash as trashcan
@@ -136,19 +138,19 @@ class SideList:
     nbytes: int = 0
 
 
-def _write_side(fp, rec: indexer.Record, side: SideList) -> None:
+def _write_side(fp: IO[str], rec: indexer.Record, side: SideList) -> None:
     fp.write(json.dumps(rec.path))
     fp.write("\n")
     side.count += 1
     side.nbytes += rec.size
 
 
-def show_matches(
-    group_files,
+def write_cross_folder_matches(
+    group_files: Iterable[Path],
     folder_a: Path,
     folder_b: Path,
     tmpdir: Path,
-) -> tuple[int, SideList, SideList]:
+) -> tuple[int, int, SideList, SideList, Path]:
     side_a = SideList(tmpdir / "side_a.jsonl")
     side_b = SideList(tmpdir / "side_b.jsonl")
     matches_path = tmpdir / "matches.jsonl"
@@ -180,6 +182,14 @@ def show_matches(
             fm.write(json.dumps({"size": size, "a": a_paths, "b": b_paths}))
             fm.write("\n")
 
+    return matches, match_bytes, side_a, side_b, matches_path
+
+
+def print_cross_folder_matches(
+    matches_path: Path,
+    matches: int,
+    match_bytes: int,
+) -> None:
     print()
     print(f"{matches} matches, {indexer.format_bytes(match_bytes)}")
     print()
@@ -203,6 +213,18 @@ def show_matches(
     if leftover > 0:
         print(f"... {leftover} more")
         print()
+
+
+def show_matches(
+    group_files: Iterable[Path],
+    folder_a: Path,
+    folder_b: Path,
+    tmpdir: Path,
+) -> tuple[int, SideList, SideList]:
+    matches, match_bytes, side_a, side_b, matches_path = write_cross_folder_matches(
+        group_files, folder_a, folder_b, tmpdir
+    )
+    print_cross_folder_matches(matches_path, matches, match_bytes)
     return matches, side_a, side_b
 
 
@@ -265,9 +287,20 @@ def keep_record(recs: list[indexer.Record]) -> indexer.Record:
 
 
 def show_same_folder_matches(
-    group_files,
+    group_files: Iterable[Path],
     tmpdir: Path,
 ) -> tuple[int, SideList]:
+    matches, match_bytes, extras, matches_path = write_same_folder_matches(
+        group_files, tmpdir
+    )
+    print_same_folder_matches(matches_path, matches, match_bytes)
+    return matches, extras
+
+
+def write_same_folder_matches(
+    group_files: Iterable[Path],
+    tmpdir: Path,
+) -> tuple[int, int, SideList, Path]:
     extras = SideList(tmpdir / "extras.jsonl")
     matches_path = tmpdir / "matches.jsonl"
     matches = 0
@@ -299,6 +332,14 @@ def show_same_folder_matches(
             )
             fm.write("\n")
 
+    return matches, match_bytes, extras, matches_path
+
+
+def print_same_folder_matches(
+    matches_path: Path,
+    matches: int,
+    match_bytes: int,
+) -> None:
     print()
     print(f"{matches} matches, {indexer.format_bytes(match_bytes)}")
     print()
@@ -321,7 +362,6 @@ def show_same_folder_matches(
     if leftover > 0:
         print(f"... {leftover} more")
         print()
-    return matches, extras
 
 
 def prompt_trash_extras(folder: Path, extras: SideList) -> str:

@@ -80,6 +80,13 @@ class Record:
     digest: str = ""
 
 
+@dataclass(slots=True)
+class ReportStats:
+    group_count: int = 0
+    extra_copies: int = 0
+    wasted: int = 0
+
+
 def dumps_record(rec: Record) -> str:
     return json.dumps(
         [rec.size, rec.mtime, rec.dev, rec.ino, rec.path, rec.sample, rec.digest],
@@ -527,16 +534,20 @@ def find_duplicate_files(sorted_by_size: Path, tmpdir: Path) -> Iterator[Path]:
     for size, group_path, count in iter_colliding_keys(
         sorted_by_size, lambda rec: rec.size, tmpdir, "sizegrp_", label="Comparing"
     ):
+        unique: Path | None = None
         try:
             if count < 2:
                 continue
             unique = new_jsonl(tmpdir, "unique_")
             if collapse_hardlinks(group_path, unique, tmpdir) < 2:
                 unique.unlink(missing_ok=True)
+                unique = None
                 continue
             yield from confirm_unique_file(unique, int(size), tmpdir)
         finally:
             group_path.unlink(missing_ok=True)
+            if unique is not None:
+                unique.unlink(missing_ok=True)
 
 
 def format_bytes(n: int) -> str:
@@ -557,11 +568,15 @@ def write_report(
     scanned: int,
     errors: int,
     tmpdir: Path,
-) -> tuple[int, int, int]:
-    group_count = 0
-    extra_copies = 0
-    wasted = 0
+    echo: Callable[[str], None] | None = print,
+) -> ReportStats:
+    stats = ReportStats()
     report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(line: str = "") -> None:
+        if echo is not None:
+            echo(line)
+
     with report_path.open("w", encoding="utf-8") as fp:
         for group_path in group_files:
             n = count_records(group_path)
@@ -582,40 +597,40 @@ def write_report(
 
             first = None
             extra = n - 1
-            group_count += 1
-            extra_copies += extra
+            stats.group_count += 1
+            stats.extra_copies += extra
             for rec in records:
                 if first is None:
                     first = rec
-                    wasted += rec.size * extra
+                    stats.wasted += rec.size * extra
                     header = (
-                        f"## group {group_count}  size={rec.size}  "
+                        f"## group {stats.group_count}  size={rec.size}  "
                         f"copies={n}  wasted={rec.size * extra}"
                     )
-                    print(header)
+                    emit(header)
                     fp.write(header)
                     fp.write("\n")
-                print(rec.path)
+                emit(rec.path)
                 fp.write(rec.path)
                 fp.write("\n")
-            print()
+            emit()
             fp.write("\n")
             if n > SORT_CHUNK:
                 group_path.unlink(missing_ok=True)
         summary = (
-            f"# scanned={scanned} errors={errors} groups={group_count} "
-            f"extra_copies={extra_copies} wasted={wasted}"
+            f"# scanned={scanned} errors={errors} groups={stats.group_count} "
+            f"extra_copies={stats.extra_copies} wasted={stats.wasted}"
         )
         fp.write(summary)
         fp.write("\n")
-    return group_count, extra_copies, wasted
+    return stats
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Find exact-byte duplicate files with low memory."
     )
-    parser.add_argument("folder", type=Path, help="Folder to scan recursively")
+    parser.add_argument("folder", type=Path, help="Folder to scan (not recursively)")
     parser.add_argument(
         "--index",
         type=Path,
@@ -669,14 +684,14 @@ def main(argv: list[str] | None = None) -> int:
         external_sort(index_path, sorted_path, key=lambda rec: rec.size, tmpdir=tmpdir)
         print("Comparing same-size candidates...")
         group_files = find_duplicate_files(sorted_path, tmpdir)
-        group_count, extra, wasted = write_report(
+        stats = write_report(
             group_files, report_path, scanned, errors, tmpdir
         )
 
     print(f"Wrote report to {report_path}")
     print(
-        f"Scanned {scanned} files, {group_count} duplicate groups, "
-        f"{extra} extra copies, {format_bytes(wasted)} wasted"
+        f"Scanned {scanned} files, {stats.group_count} duplicate groups, "
+        f"{stats.extra_copies} extra copies, {format_bytes(stats.wasted)} wasted"
     )
     return 0
 

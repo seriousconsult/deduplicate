@@ -67,7 +67,6 @@ COMMAND_WORDS = frozenset(
 SCRIPT_SUFFIXES = frozenset({".exe", ".bat", ".cmd", ".ps1", ".sh", ".com", ".vbs", ".js"})
 EXT_BODY = re.compile(r"^[a-z0-9]{1,10}$")
 MENU_NUMBER = re.compile(r"^[1-9][0-9]*$")
-PATH_EXTRA = frozenset("._-~/\\: ()[]',+@")
 
 
 class InputError(ValueError):
@@ -76,6 +75,11 @@ class InputError(ValueError):
 
 def _has_shell_chars(raw: str) -> bool:
     return any(ch in SHELL_CHARS for ch in raw)
+
+
+def _has_control_chars(raw: str, allow_tab: bool = False) -> bool:
+    allowed = "\t" if allow_tab else ""
+    return "\x00" in raw or any(ord(ch) < 32 for ch in raw if ch not in allowed)
 
 
 def looks_like_command(raw: str) -> bool:
@@ -90,12 +94,18 @@ def looks_like_command(raw: str) -> bool:
     return first in COMMAND_WORDS and len(tokens) > 1
 
 
-def path_chars_ok(text: str) -> bool:
-    if _has_shell_chars(text):
+def looks_like_path_command(raw: str) -> bool:
+    tokens = raw.split()
+    if not tokens:
         return False
-    for ch in text:
-        if ch.isalnum() or ch in PATH_EXTRA or ch.isalpha():
-            continue
+    first = Path(tokens[0]).name.lower()
+    if any(first.endswith(suffix) for suffix in SCRIPT_SUFFIXES):
+        return True
+    return first in COMMAND_WORDS and len(tokens) > 1
+
+
+def path_chars_ok(text: str) -> bool:
+    if _has_control_chars(text):
         return False
     return True
 
@@ -105,12 +115,17 @@ def reject_if_command(raw: str, expect: str) -> None:
         raise InputError(f"that looks like a command, not {expect}")
 
 
+def reject_if_path_command(raw: str, expect: str) -> None:
+    if looks_like_path_command(raw):
+        raise InputError(f"that looks like a command, not {expect}")
+
+
 def parse_folder_choice(raw: str) -> str:
     """Return 'stay', 'parent', a menu number, or a path string."""
     text = raw.strip()
     if text != raw:
         text = text.strip()
-    if "\x00" in raw or any(ord(ch) < 32 for ch in raw if ch not in "\t"):
+    if _has_control_chars(raw, allow_tab=True):
         raise InputError("control characters are not allowed")
     if text == "":
         return ""
@@ -118,7 +133,7 @@ def parse_folder_choice(raw: str) -> str:
         return ".."
     if MENU_NUMBER.fullmatch(text):
         return text
-    reject_if_command(text, "a folder path")
+    reject_if_path_command(text, "a folder path")
     if not path_chars_ok(text):
         raise InputError("only a folder path is allowed")
     return text
@@ -127,7 +142,7 @@ def parse_folder_choice(raw: str) -> str:
 def parse_single_extension(raw: str) -> str:
     """One extension token such as mp4 or .webm. No lists or commands."""
     text = raw.strip()
-    if text != raw.strip() or any(ord(ch) < 32 for ch in raw):
+    if text != raw.strip() or _has_control_chars(raw):
         raise InputError("control characters are not allowed")
     if not text:
         raise InputError("empty extension")
@@ -145,7 +160,7 @@ def parse_single_extension(raw: str) -> str:
 
 def parse_choice(raw: str, allowed: frozenset[str]) -> str:
     text = raw.strip()
-    if any(ord(ch) < 32 for ch in raw):
+    if _has_control_chars(raw):
         raise InputError("control characters are not allowed")
     reject_if_command(text, "a menu choice")
     key = text.upper()
@@ -155,10 +170,9 @@ def parse_choice(raw: str, allowed: frozenset[str]) -> str:
 
 
 def require_existing_dir(text: str) -> Path:
-    reject_if_command(text, "a folder path")
-    expanded = str(Path(text).expanduser())
-    if not path_chars_ok(text) and not path_chars_ok(expanded):
+    if not path_chars_ok(text):
         raise InputError("only a folder path is allowed")
+    reject_if_path_command(text, "a folder path")
     path = Path(text).expanduser()
     if not path.is_dir():
         raise InputError(f"not a folder: {text}")

@@ -47,3 +47,11 @@ If you pick the same folder twice, it looks for duplicates **inside that folder*
 - `duplicates.txt` — confirmed exact-byte duplicate groups.
 
 While it runs, sort runs and same-size candidate lists go into a temporary directory and are deleted afterward.
+
+## Quality checks
+
+```bash
+python3 -m unittest discover -s tests
+python3 -m compileall -q .
+python3 -m tabnanny .
+```
